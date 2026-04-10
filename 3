@@ -4,7 +4,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
-local LocalPlayer = Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer or Players:GetPropertyChangedSignal("LocalPlayer"):Wait() or Players.LocalPlayer
 
 -- ************************ 遠程白名單配置 ************************
 local WHITELIST_REMOTE_URL = "https://raw.githubusercontent.com/tpes10831-cmd/441/refs/heads/main/3"
@@ -683,6 +683,33 @@ LoadButton.MouseButton1Click:Connect(function()
         end)
         
         warn("小傑腳本已啟動，開始加載功能")
+        
+        -- 提前聲明所有共享變數以解決作用域問題
+        local newcclosure = newcclosure or function(f) return f end
+        local getnamecallmethod = getnamecallmethod or function() return "" end
+        local setreadonly = setreadonly or function() end
+        local checkcaller = checkcaller or function() return false end
+        
+        local selectedTargetPlayer = nil
+        local sharedPlayerList = {}
+        local sharedPlayerMap = {}
+        local aimbotConnection = nil
+        local IsTargetAlive, GetNearestPlayer, StartAimbot, StopAimbot -- 預留函數名
+        local AimbotConfig = {
+            Enabled = false,
+            Mode = "Specific",
+            TargetPart = "HumanoidRootPart",
+        }
+        local SilentAimConfig = {
+            Enabled = false,
+            PredictionEnabled = true,
+            PredictionAmount = 0.12,
+            MaxRange = 5000,
+            PlayersPosition = nil,
+            Skills = {"Z", "X", "C", "V"},
+            Booms = {"TAP", "MainClick"},
+            UI_Blacklist = {"HUDUpdate", "InventoryUpdate", "GetInventory", "equip", "unequip", "UpdatePlayerGui", "SetCore"}
+        }
         
         -- 加載 WindUI
         local WindUI
@@ -4340,155 +4367,6 @@ Tabs.ActivityTab:Button({
         
 -- ===================== 秒殺功能頁 (完整整合版) =====================
 
--- ==================== 靜默自瞄初始化函數 ====================
-local SilentAimConfig = {
-    Enabled = false,
-    PredictionEnabled = true,
-    PredictionAmount = 0.12,
-    MaxRange = 5000,
-    PlayersPosition = nil,
-    Skills = {"Z", "X", "C", "V"},
-    Booms = {"TAP", "MainClick"},
-    UI_Blacklist = {"HUDUpdate", "InventoryUpdate", "GetInventory", "equip", "unequip", "UpdatePlayerGui", "SetCore"}
-}
-
-local function InitializeSilentAim()
-    local function getHRP(model)
-        return model and model:FindFirstChild("HumanoidRootPart")
-    end
-
-    local function getPredictedPosition(targetChar)
-        local hrp = getHRP(targetChar)
-        if not hrp then return nil end
-        local velocity = hrp.Velocity
-        if not SilentAimConfig.PredictionEnabled or velocity.Magnitude < 2 then
-            return hrp.Position
-        end
-        return hrp.Position + (velocity * SilentAimConfig.PredictionAmount)
-    end
-
-    local function ApplySilentAimHook()
-        local ok, Mouse = pcall(function() return LocalPlayer:GetMouse() end)
-        if not ok or not Mouse then return end
-
-        local ok2, mt = pcall(getrawmetatable, game)
-        if ok2 and mt then
-            local oldIndex = mt.__index
-            local oldNamecall = mt.__namecall
-            setreadonly(mt, false)
-            
-            mt.__index = function(self, key)
-                local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
-                if not checkcaller() and SilentAimConfig.Enabled and SilentAimConfig.PlayersPosition and not isRPressed then
-                    if self == Mouse and (key == "Hit" or key == "Target") then
-                        if key == "Hit" then return CFrame.new(SilentAimConfig.PlayersPosition)
-                        elseif key == "Target" then
-                            local target = AimbotConfig.Mode == "Specific" and selectedTargetPlayer or GetNearestPlayer()
-                            return target and getHRP(target.Character) or oldIndex(self, key)
-                        end
-                    end
-                end
-                return oldIndex(self, key)
-            end
-            
-            mt.__namecall = function(self, ...)
-                local method = getnamecallmethod()
-                local args = {...}
-                local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
-                
-                if not checkcaller() and SilentAimConfig.Enabled and SilentAimConfig.PlayersPosition and not isRPressed then
-                    if method == "FireServer" or method == "InvokeServer" then
-                        local name = self.Name
-                        
-                        for _, blacklisted in ipairs(SilentAimConfig.UI_Blacklist) do
-                            if name:find(blacklisted) then return oldNamecall(self, ...) end
-                        end
-
-                        local isCombat = (name == "CommE" or name == "RegisterHit" or name == "RegisterAttack" or name == "RemoteEvent" or name == "CommF_")
-                        
-                        if isCombat then
-                            local changed = false
-                            for i, arg in ipairs(args) do
-                                if typeof(arg) == "Vector3" then
-                                    args[i] = SilentAimConfig.PlayersPosition
-                                    changed = true
-                                elseif typeof(arg) == "CFrame" then
-                                    args[i] = CFrame.new(SilentAimConfig.PlayersPosition) * (arg - arg.Position)
-                                    changed = true
-                                elseif type(arg) == "table" then
-                                    local function deepFix(t)
-                                        for k, v in pairs(t) do
-                                            if typeof(v) == "Vector3" then
-                                                t[k] = SilentAimConfig.PlayersPosition
-                                                changed = true
-                                            elseif typeof(v) == "CFrame" then
-                                                t[k] = CFrame.new(SilentAimConfig.PlayersPosition) * (v - v.Position)
-                                                changed = true
-                                            elseif type(v) == "table" then
-                                                deepFix(v)
-                                            end
-                                        end
-                                    end
-                                    deepFix(arg)
-                                end
-                            end
-                            
-                            if not changed and type(args[1]) == "string" then
-                                if table.find(SilentAimConfig.Skills, args[1]:upper()) or table.find(SilentAimConfig.Booms, args[1]) then
-                                    if #args >= 2 then
-                                        for i = 2, #args do
-                                            if typeof(args[i]) == "Vector3" then
-                                                args[i] = SilentAimConfig.PlayersPosition
-                                                changed = true
-                                                break
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-
-                            if changed then
-                                return oldNamecall(self, unpack(args))
-                            end
-                        end
-                    end
-                end
-                return oldNamecall(self, ...)
-            end
-            
-            setreadonly(mt, true)
-        end
-    end
-
-    ApplySilentAimHook()
-
-    local MouseModule = ReplicatedStorage:FindFirstChild("Mouse")
-    RunService.Heartbeat:Connect(function()
-        if not SilentAimConfig.Enabled then
-            SilentAimConfig.PlayersPosition = nil
-            return
-        end
-
-        local target = AimbotConfig.Mode == "Specific" and selectedTargetPlayer or GetNearestPlayer()
-        local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
-        
-        if target and IsTargetAlive(target) and not isRPressed then
-            SilentAimConfig.PlayersPosition = getPredictedPosition(target.Character)
-            
-            if MouseModule then
-                local ok, m = pcall(require, MouseModule)
-                if ok and type(m) == "table" then
-                    m.Hit = CFrame.new(SilentAimConfig.PlayersPosition)
-                end
-            end
-        else
-            SilentAimConfig.PlayersPosition = nil
-        end
-    end)
-end
-
--- ==================== 配置區 ====================
-
 local InstantKillConfig = {
     Enabled = false,
     VoidTime = 0.55,
@@ -4500,7 +4378,7 @@ local InstantKillConfig = {
     EnableBuddhaHit = true,     -- 佛 (Buddha2pickup) 音效觸發
 }
 
-local AimbotConfig = {
+AimbotConfig = {
     Enabled = false,
     Mode = "Specific",  -- "Specific" = 鎖特定人, "Nearest" = 鎖最近的人
     TargetPart = "HumanoidRootPart",
@@ -4519,10 +4397,10 @@ local VoidState = { IsTeleporting = false }
 local trackedSounds = {}
 local killConnection = nil
 
-local sharedPlayerList = {}
-local sharedPlayerMap = {}
-local selectedTargetPlayer = nil
-local aimbotConnection = nil
+sharedPlayerList = {}
+sharedPlayerMap = {}
+selectedTargetPlayer = nil
+aimbotConnection = nil
 
 -- 按鈕變數
 local killButton = nil
@@ -4633,7 +4511,7 @@ end
 
 -- ==================== 玩家列表功能 ====================
 
-local function RefreshSharedPlayerList()
+RefreshSharedPlayerList = function()
     sharedPlayerList = {}
     sharedPlayerMap = {}
     for _, p in ipairs(Players:GetPlayers()) do
@@ -4644,7 +4522,7 @@ local function RefreshSharedPlayerList()
     end
 end
 
-local function IsTargetAlive(player)
+IsTargetAlive = function(player)
     if player and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
         local hum = player.Character:FindFirstChildOfClass("Humanoid")
         return hum and hum.Health > 0
@@ -4654,7 +4532,7 @@ end
 
 -- ==================== 獲取最近的玩家 ====================
 
-local function GetNearestPlayer()
+GetNearestPlayer = function()
     local nearestPlayer = nil
     local nearestDistance = math.huge
     
@@ -4685,7 +4563,7 @@ end
 
 -- ==================== 鎖人功能（支援兩種模式）====================
 
-local function StartAimbot()
+StartAimbot = function()
     if aimbotConnection then aimbotConnection:Disconnect() end
     
     aimbotConnection = RunService.RenderStepped:Connect(function()
@@ -4710,7 +4588,7 @@ local function StartAimbot()
     end)
 end
 
-local function StopAimbot()
+StopAimbot = function()
     if aimbotConnection then aimbotConnection:Disconnect() end
 end
 
@@ -5362,6 +5240,149 @@ InitializeSilentAim()
         print("✅ 聚怪功能已整合！")
         print("✅ FOV 視角範圍功能已新增！")
         print("✅ 時間神殿傳送點已新增！")
+
+        -- ==================== 靜默自瞄核心邏輯 ====================
+        local function InitializeSilentAim()
+            local function getHRP(model)
+                return model and model:FindFirstChild("HumanoidRootPart")
+            end
+
+            local function getPredictedPosition(targetChar)
+                local hrp = getHRP(targetChar)
+                if not hrp then return nil end
+                local velocity = hrp.Velocity
+                if not SilentAimConfig.PredictionEnabled or velocity.Magnitude < 2 then
+                    return hrp.Position
+                end
+                return hrp.Position + (velocity * SilentAimConfig.PredictionAmount)
+            end
+
+            local function ApplySilentAimHook()
+                local ok, Mouse = pcall(function() return LocalPlayer:GetMouse() end)
+                if not ok or not Mouse then return end
+
+                local ok2, mt = pcall(getrawmetatable, game)
+                if ok2 and mt then
+                    local oldIndex = mt.__index
+                    local oldNamecall = mt.__namecall
+                    setreadonly(mt, false)
+                    
+                    mt.__index = newcclosure(function(self, key)
+                        local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
+                        if not checkcaller() and SilentAimConfig.Enabled and SilentAimConfig.PlayersPosition and not isRPressed then
+                            if self == Mouse and (key == "Hit" or key == "Target") then
+                                if key == "Hit" then return CFrame.new(SilentAimConfig.PlayersPosition)
+                                elseif key == "Target" then
+                                    local target = AimbotConfig.Mode == "Specific" and selectedTargetPlayer or GetNearestPlayer()
+                                    return target and getHRP(target.Character) or (type(oldIndex) == "function" and oldIndex(self, key) or oldIndex[key])
+                                end
+                            end
+                        end
+                        return type(oldIndex) == "function" and oldIndex(self, key) or oldIndex[key]
+                    end)
+                    
+                    mt.__namecall = newcclosure(function(self, ...)
+                        local method = getnamecallmethod()
+                        local args = {...}
+                        local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
+                        
+                        if not checkcaller() and SilentAimConfig.Enabled and SilentAimConfig.PlayersPosition and not isRPressed then
+                            if method == "FireServer" or method == "InvokeServer" then
+                                local name = self.Name
+                                
+                                for _, blacklisted in ipairs(SilentAimConfig.UI_Blacklist) do
+                                    if name:find(blacklisted) then return oldNamecall and oldNamecall(self, ...) end
+                                end
+
+                                local isCombat = (name == "CommE" or name == "RegisterHit" or name == "RegisterAttack" or name == "RemoteEvent" or name == "CommF_")
+                                
+                                if isCombat then
+                                    local changed = false
+                                    for i, arg in ipairs(args) do
+                                        if typeof(arg) == "Vector3" then
+                                            args[i] = SilentAimConfig.PlayersPosition
+                                            changed = true
+                                        elseif typeof(arg) == "CFrame" then
+                                            args[i] = CFrame.new(SilentAimConfig.PlayersPosition) * (arg - arg.Position)
+                                            changed = true
+                                        elseif type(arg) == "table" then
+                                            local function deepFix(t)
+                                                for k, v in pairs(t) do
+                                                    if typeof(v) == "Vector3" then
+                                                        t[k] = SilentAimConfig.PlayersPosition
+                                                        changed = true
+                                                    elseif typeof(v) == "CFrame" then
+                                                        t[k] = CFrame.new(SilentAimConfig.PlayersPosition) * (v - v.Position)
+                                                        changed = true
+                                                    elseif type(v) == "table" then
+                                                        deepFix(v)
+                                                    end
+                                                end
+                                            end
+                                            deepFix(arg)
+                                        end
+                                    end
+                                    
+                                    if not changed and type(args[1]) == "string" then
+                                        if table.find(SilentAimConfig.Skills, args[1]:upper()) or table.find(SilentAimConfig.Booms, args[1]) then
+                                            if #args >= 2 then
+                                                for i = 2, #args do
+                                                    if typeof(args[i]) == "Vector3" then
+                                                        args[i] = SilentAimConfig.PlayersPosition
+                                                        changed = true
+                                                        break
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+
+                                    if changed then
+                                        return oldNamecall(self, unpack(args))
+                                    end
+                                end
+                            end
+                        end
+                        return oldNamecall and oldNamecall(self, ...)
+                    end)
+                    
+                    setreadonly(mt, true)
+                end
+            end
+
+            ApplySilentAimHook()
+
+            local MouseModule = ReplicatedStorage:FindFirstChild("Mouse")
+            RunService.Heartbeat:Connect(function()
+                if not SilentAimConfig.Enabled then
+                    SilentAimConfig.PlayersPosition = nil
+                    return
+                end
+
+                local target = AimbotConfig.Mode == "Specific" and selectedTargetPlayer or GetNearestPlayer()
+                local isRPressed = UserInputService:IsKeyDown(Enum.KeyCode.R)
+                
+                if target and IsTargetAlive(target) and not isRPressed then
+                    SilentAimConfig.PlayersPosition = getPredictedPosition(target.Character)
+                    
+                    if MouseModule then
+                        local ok, m = pcall(require, MouseModule)
+                        if ok and type(m) == "table" then
+                            m.Hit = CFrame.new(SilentAimConfig.PlayersPosition)
+                        end
+                    end
+                else
+                    SilentAimConfig.PlayersPosition = nil
+                end
+            end)
+        end
+        
+        -- 啟動靜默自瞄
+        task.spawn(function()
+            local ok, err = pcall(InitializeSilentAim)
+            if not ok then warn("靜默自瞄加載失敗: " .. tostring(err)) end
+        end)
+        print("✅ 靜默自瞄已嘗試加載！")
     end)
     
     if not success then
